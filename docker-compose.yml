@@ -1,0 +1,11 @@
+---
+version: '3.8'
+services:
+  app:
+    image: haskell:9
+    volumes:
+      - .:/app
+      - $HOME:$HOME
+    user: $UID:$GID
+    environment:
+      HOME: $HOME
