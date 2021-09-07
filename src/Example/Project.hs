@@ -26,30 +26,51 @@ g = 6.673e-11
 dampening :: MyFixed
 dampening = 0.1
 
--- Performance can be improved by skipping self-acting forces since these will always be 0.
--- Note that this is a simple Euler integrator and thus not very accurate.
-applyForces :: (KnownNat n, 1 <= n) => Bodies n -> Body -> Body
-applyForces sources target = target { velocity = velocity target + sum (map forceFor sources) }
+forceApplicator :: DSignal dom d (Bodies (2 ^ k), Body) -> DSignal dom (d + k) Body
+forceApplicator inputSignal = applyForce <$> delayI targetSignal <*> totalForceSignal
   where
+    (sourcesSignal, targetSignal) = unbundle inputSignal
+    foldSignals = bundle (,targetSignal) <$> unbundle sourcesSignal
+    totalForceSignal = delayedFold d1 (V3 0 0 0) (\acc (source, target) -> acc + forceFor target source) foldSigs
+
+    applyForce :: Body -> FixedV3 -> Body
+    applyForce target force = target { velocity = velocity target + force }
+
     forceFor :: Body -> FixedV3
-    forceFor source = g * mass target * mass source *^ r ^/ dotx
+    forceFor target source = g * mass target * mass source *^ r ^/ dotx
       where
         dotx :: MyFixed
         dotx = (position source `dot` position target) + dampening
         r :: FixedV3
         r = (position source - position target) ^/ sqrtC d10 dotx
 
-applyVelocity :: Body -> Body
-applyVelocity body = body { position = position body + velocity body }
+velocityApplicator :: DSignal dom d Body -> DSignal dom d Body
+velocityApplicator = fmap applyVelocity
+  where
+    applyVelocity :: Body -> Body
+    applyVelocity body = body { position = position body + velocity body }
+
+gravityApplicator :: DSignal dom d (Bodies (2 ^ k), Body) -> DSignal dom (d + k) Body
+gravityApplicator = velocityApplicator . forceApplicator
+
+multiGravityApplicator :: DSignal dom d (Bodies (2 ^ k)) -> DSignal dom (d + k) (Bodies (2 ^ k))
+multiGravityApplicator bodiesSignal = traverse (gravityApplicator . bundle . (bodiesSignal,)) . unbundle $ bodiesSignal
+
+nBodyIntegrator :: SNat (2 ^ k) -> Signal dom d (Bodies (2 ^ k)) -> Signal dom (d + k) (Bodies (2 ^ k))
+nBodyIntegrator n bodiesSignal = output
+  where
+    isFirst = register True (const False <$> isFirst)
+    shouldEmit = (==0) <$> moore (\s _ -> succ s % n) id 0
 
 -- Integrate using a Moore machine
 nbodyIntegrator :: (HiddenClockResetEnable dom, KnownNat n, 1 <= n) => Signal dom (Maybe (Bodies n)) -> Signal dom (Maybe (Bodies n))
-nbodyIntegrator = moore step id Nothing
+nbodyIntegrator input = output
+  (moore step id Nothing
   where
     step :: (KnownNat n, 1 <= n) => Maybe (Bodies n) -> Maybe (Bodies n) -> Maybe (Bodies n)
     step Nothing Nothing = Nothing
     step Nothing (Just input) = Just input
-    step (Just bodies) _ = Just . map applyVelocity . map (applyForces bodies) $ bodies
+    step (Just bodies) _ = Just . fmap (applyVelocity . applyForces bodies) $ bodies
 
 inputMemory :: (HiddenClockResetEnable dom, KnownNat n) => Bodies n -> Blockram dom n Body
 inputMemory inputData = blockRam inputData
